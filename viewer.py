@@ -8,13 +8,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
 from afm import Scan, level_height, line_profile, load_inputs, pair_metrics, roughness, scan_pairs, step_height
 from batch import describe, draw_map, save_json, save_map, save_pixels
+from navigation import PlotNavigation
+from surface import SurfaceView
 
 
 class Viewer:
@@ -43,28 +45,69 @@ class Viewer:
         self.level = ttk.Combobox(panel, state="readonly", width=18)
         self.level.pack(side="left", padx=5)
         self.level.bind("<<ComboboxSelected>>", self.render)
-        ttk.Button(panel, text="Export", command=self.export).pack(side="left")
+        self.tabs = ttk.Notebook(root)
+        self.tabs.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.analysis_tab = ttk.Frame(self.tabs)
+        self.surface_tab = ttk.Frame(self.tabs)
+        self.tabs.add(self.analysis_tab, text="2D Analysis")
+        self.tabs.add(self.surface_tab, text="3D Surface")
 
-        tools = ttk.Frame(root, padding=(12, 0))
+        tools = ttk.Frame(self.analysis_tab, padding=(12, 8))
         tools.pack(side="top", fill="x")
         for label, mode in (("Line profile", "line"), ("Region A", "A"), ("Region B", "B")):
             ttk.Button(tools, text=label, command=lambda m=mode: self.start_tool(m)).pack(side="left", padx=(0, 5))
         ttk.Button(tools, text="Clear selection", command=self.clear_selection).pack(side="left", padx=(0, 5))
         ttk.Button(tools, text="Fit map", command=self.fit_map).pack(side="left")
+        ttk.Button(tools, text="Export", command=self.export).pack(side="right")
+        ttk.Label(self.analysis_tab, text="Left click or drag to measure · Right/middle drag to pan · Scroll to zoom",
+                  padding=(12, 0)).pack(anchor="w")
         self.status = tk.StringVar(value="Open a Park AFM TIFF, folder, or ZIP.")
-        ttk.Label(tools, textvariable=self.status, padding=(10, 0)).pack(side="left")
+        ttk.Label(self.analysis_tab, textvariable=self.status, padding=(12, 3)).pack(anchor="w")
 
         self.details = tk.StringVar()
-        ttk.Label(root, textvariable=self.details, padding=(12, 8), justify="left").pack(side="bottom", fill="x")
-        figure_frame = ttk.Frame(root)
+        ttk.Label(self.analysis_tab, textvariable=self.details, padding=(12, 8),
+                  justify="left").pack(side="bottom", fill="x")
+        figure_frame = ttk.Frame(self.analysis_tab)
         figure_frame.pack(fill="both", expand=True)
         self.figure = Figure(figsize=(10, 5), layout="constrained")
         self.canvas = FigureCanvasTkAgg(self.figure, master=figure_frame)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, figure_frame, pack_toolbar=False)
-        self.toolbar.pack(side="bottom", fill="x")
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.navigation = PlotNavigation(self.canvas)
         self.canvas.mpl_connect("button_press_event", self.click_map)
+        root.bind("<Escape>", self.cancel_tool)
+        self.setup_surface()
+        self.tabs.bind("<<NotebookTabChanged>>", self.refresh_surface)
         self.render()
+
+    def setup_surface(self):
+        tools = ttk.Frame(self.surface_tab, padding=(12, 8))
+        tools.pack(fill="x")
+        ttk.Label(tools, text="Left drag to orbit · Scroll to zoom").pack(side="left")
+        ttk.Button(tools, text="Reset camera", command=lambda: self.surface.reset()).pack(side="right")
+        self.camera = tk.StringVar()
+        ttk.Label(self.surface_tab, textvariable=self.camera, padding=(12, 2)).pack(anchor="w")
+        figure = Figure(figsize=(10, 5), layout="constrained")
+        canvas = FigureCanvasTkAgg(figure, master=self.surface_tab)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.surface = SurfaceView(figure, self.update_camera_label)
+        self.surface_key = None
+        self.surface.show(None, None, "")
+
+    def update_camera_label(self, azimuth, elevation, zoom):
+        low, high = self.surface.ax.get_zlim()
+        self.camera.set(f"Azimuth {azimuth:.0f}°   Elevation {elevation:.0f}°   Zoom {zoom:.2f}×"
+                        f"   |   Z limits {low:.4g} to {high:.4g} {self.surface.scan.unit}")
+
+    def refresh_surface(self, event=None):
+        if self.scan is None or self.tabs.select() != str(self.surface_tab):
+            return
+        level = self.level.get()
+        reference = self.regions.get("A") if level == "Region A plane" else None
+        key = (id(self.scan), level, reference)
+        if key != self.surface_key:
+            self.camera.set("")
+            self.surface.show(self.scan, self.displayed_values(self.scan), level)
+            self.surface_key = key
 
     def open_files(self):
         files = filedialog.askopenfilenames(
@@ -88,7 +131,8 @@ class Viewer:
             f"{i + 1:02d}  {scan.channel} · {scan.direction}   |   {scan.name}"
             for i, scan in enumerate(scans)
         ])
-        self.channel.current(0)
+        self.channel.current(next((i for i, scan in enumerate(scans)
+                                   if scan.is_height and scan.direction == "Forward"), 0))
         self.select_scan()
         self.status.set(f"Loaded {len(scans)} channels.")
         if problems:
@@ -122,9 +166,6 @@ class Viewer:
         if mode in ("A", "B") and not self.scan.is_height:
             self.status.set("Select a topography channel to measure height and roughness.")
             return
-        if self.toolbar.mode:
-            self.status.set("Turn off pan or zoom before selecting.")
-            return
         self.tool = mode
         if mode == "line":
             self.points.clear()
@@ -133,8 +174,17 @@ class Viewer:
             self.status.set(f"Drag a rectangle for region {mode}.")
         self.render()
 
+    def cancel_tool(self, event=None):
+        if self.tool is None:
+            return
+        if self.tool == "line" and len(self.points) == 1:
+            self.points.clear()
+        self.tool = None
+        self.status.set("Selection canceled.")
+        self.render()
+
     def click_map(self, event):
-        if (self.tool != "line" or self.toolbar.mode or event.button != 1
+        if (self.tool != "line" or event.button != 1
                 or event.inaxes is not self.map_ax or event.xdata is None or event.ydata is None):
             return
         point = (event.xdata, event.ydata)
@@ -191,6 +241,7 @@ class Viewer:
             limits = self.map_ax.get_xlim(), self.map_ax.get_ylim()
         self.figure.clear()
         self.map_ax, profile_ax = self.figure.subplots(1, 2, gridspec_kw={"width_ratios": [1.15, 1]})
+        self.navigation.set_axes(self.map_ax, profile_ax, self.scan)
         self.profiles = []
         if self.scan is None:
             self.map_ax.set_axis_off()
@@ -230,10 +281,10 @@ class Viewer:
         if self.tool in ("A", "B"):
             self.selector = RectangleSelector(self.map_ax, self.select_region, button=[1],
                                               props={"facecolor": "#38d9e6", "alpha": 0.25},
-                                              useblit=True)
-        self.toolbar.update()
+                                              useblit=False)
         self.canvas.draw_idle()
         self.update_details()
+        self.refresh_surface()
 
     def update_details(self):
         scan = self.scan
