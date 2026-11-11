@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+afm-results/
+*.tif
+*.tiff
+*.zip
