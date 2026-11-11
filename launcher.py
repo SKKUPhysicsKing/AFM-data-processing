@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,11 +33,16 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def download(url: str, max_bytes: int) -> bytes:
-    request = Request(url, headers={"User-Agent": "AFM-XE7-ANALYZER",
-                                    "Accept": "application/vnd.github+json"})
-    with urlopen(request, timeout=6) as response:
+    host = urlsplit(url).netloc
+    is_ref = host == "api.github.com"
+    request = Request(url, headers={
+        "User-Agent": "AFM-XE7-ANALYZER",
+        "Accept": "application/vnd.github+json" if is_ref else "application/zip",
+        "Cache-Control": "no-cache" if is_ref else "max-age=86400",
+    })
+    with urlopen(request, timeout=15 if is_ref else 30) as response:
         target = urlsplit(response.geturl())
-        if target.scheme != "https" or target.netloc != urlsplit(url).netloc:
+        if target.scheme != "https" or target.netloc != host:
             raise ValueError("The update download redirected outside the expected GitHub host.")
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
@@ -69,8 +75,19 @@ def unpack_package(data: bytes, revision: str, destination: Path) -> None:
                 raise ValueError("Invalid or oversized update package.")
             names.add(name.casefold())
             (destination / name).write_bytes(archive.read(member))
-    if not REQUIRED.issubset({entry.name for entry in destination.iterdir()}):
+    validate_package(destination)
+
+
+def validate_package(folder: Path) -> None:
+    if not REQUIRED.issubset({entry.name for entry in folder.iterdir() if entry.is_file()}):
         raise ValueError("The update package is missing application files.")
+
+
+def copy_seed(source: Path, destination: Path) -> None:
+    for entry in source.iterdir():
+        if entry.is_file() and (entry.name == "requirements.txt" or SOURCE_NAME.fullmatch(entry.name)):
+            shutil.copyfile(entry, destination / entry.name)
+    validate_package(destination)
 
 
 def env_python(environment: Path, windowed: bool = False) -> Path:
@@ -154,29 +171,40 @@ def update_lock(home: Path):
         yield
 
 
-def prepare_app(home: Path, status) -> dict:
+def prepare_app(home: Path, status, seed: tuple[str, Path] | None = None) -> dict:
     """Activate a complete, tested revision; retain the current one on failure."""
     home.mkdir(parents=True, exist_ok=True)
     try:
         with update_lock(home):
             active = installed(home)
-            status("Checking for an update…")
-            revision = current_revision()
+            if active is None and seed is not None:
+                revision, bundled = seed
+                if not SHA.fullmatch(revision):
+                    raise ValueError("Invalid installer revision.")
+                status("Preparing the included application…")
+            else:
+                bundled = None
+                status("Checking for an update…")
+                revision = current_revision()
             if active and revision == active["revision"]:
                 return active
-            status("Downloading the application…")
             versions = home / "versions"
             versions.mkdir(exist_ok=True)
             package = versions / revision
             if package.is_dir():
+                validate_package(package)
                 environment = environment_for(home, package, status)
                 check_package(home, package, environment)
             else:
-                archive = download(f"https://codeload.github.com/{REPO}/zip/{revision}", PACKAGE_LIMIT)
                 with tempfile.TemporaryDirectory(prefix=".install-", dir=versions) as stage:
                     staging = Path(stage) / "app"
                     staging.mkdir()
-                    unpack_package(archive, revision, staging)
+                    if bundled is not None:
+                        copy_seed(bundled, staging)
+                    else:
+                        status("Downloading the application…")
+                        archive = download(f"https://codeload.github.com/{REPO}/zip/{revision}", PACKAGE_LIMIT)
+                        unpack_package(archive, revision, staging)
                     environment = environment_for(home, staging, status)
                     status("Checking the new application…")
                     check_package(home, staging, environment)
@@ -238,6 +266,9 @@ def main() -> int:
     if os.name != "nt":
         raise SystemExit("The installed launcher is for Windows. Run viewer.py for source use.")
     installing = "--install" in sys.argv
+    seed = None
+    if installing and "--seed" in sys.argv:
+        seed = (sys.argv[sys.argv.index("--seed") + 1], Path(__file__).resolve().parent)
     home = Path(os.environ["LOCALAPPDATA"]) / "Programs" / APP_NAME
     home.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=home / "launcher.log", encoding="utf-8", level=logging.INFO,
@@ -260,7 +291,7 @@ def main() -> int:
 
     def worker():
         try:
-            active = prepare_app(home, lambda message: results.put(("status", message)))
+            active = prepare_app(home, lambda message: results.put(("status", message)), seed)
             if installing:
                 create_shortcut(home)
             launch_app(home, active)

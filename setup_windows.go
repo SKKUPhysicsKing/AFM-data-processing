@@ -3,7 +3,7 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +12,11 @@ import (
 	"unsafe"
 )
 
-//go:embed launcher.py
-var launcher []byte
+//go:embed *.py requirements.txt
+var sources embed.FS
+
+// Set at build time to the commit of the bundled application.
+var seedRevision string
 
 const appName = "AFM XE7 ANALYZER"
 const createNoWindow = 0x08000000
@@ -54,12 +57,25 @@ func main() {
 		return
 	}
 	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "launcher.py")
-	if err := os.WriteFile(path, launcher, 0600); err != nil {
+	entries, err := sources.ReadDir(".")
+	if err != nil {
 		showError(err.Error())
 		return
 	}
-	args := append(append([]string{}, python[1:]...), "-I", path, "--install")
+	for _, entry := range entries {
+		content, err := sources.ReadFile(entry.Name())
+		if err == nil {
+			err = os.WriteFile(filepath.Join(dir, entry.Name()), content, 0600)
+		}
+		if err != nil {
+			showError(err.Error())
+			return
+		}
+	}
+	args := append(append([]string{}, python[1:]...), "-I", filepath.Join(dir, "launcher.py"), "--install")
+	if seedRevision != "" {
+		args = append(args, "--seed", seedRevision)
+	}
 	cmd := exec.Command(python[0], args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	if err := cmd.Start(); err != nil {

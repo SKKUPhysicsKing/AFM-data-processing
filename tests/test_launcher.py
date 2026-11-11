@@ -19,6 +19,22 @@ def package(revision, names=None):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_first_install_can_use_the_embedded_revision_without_github(self):
+        revision, environment = "a" * 40, "e" * 24
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            source, home = base / "bundle", base / "install"
+            source.mkdir()
+            for name in launcher.REQUIRED:
+                (source / name).touch()
+            with patch.object(launcher, "current_revision") as fetch_ref, \
+                 patch.object(launcher, "environment_for", return_value=environment), \
+                 patch.object(launcher, "check_package"):
+                result = launcher.prepare_app(home, lambda _: None, seed=(revision, source))
+            fetch_ref.assert_not_called()
+            self.assertEqual(result["revision"], revision)
+            self.assertTrue((home / "versions" / revision / "viewer.py").is_file())
+
     def test_unpack_requires_all_app_files_and_ignores_parent_paths(self):
         revision = "a" * 40
         with tempfile.TemporaryDirectory() as root:

@@ -4,7 +4,7 @@ Park Systems XE7의 TIFF 원시 측정 데이터를 여는 로컬 분석 프로�
 
 ## Windows 앱 설치와 업데이트
 
-**AFM-XE7-ANALYZER-Setup-x64.exe**를 한 번 실행하면 시작 메뉴에 **AFM XE7 ANALYZER**가 생깁니다. 설치에는 Windows x64와 Tcl/Tk가 포함된 Python 3.10 이상이 필요합니다. 처음 설치할 때 앱 전용 환경에 NumPy와 Matplotlib를 설치합니다.
+**AFM-XE7-ANALYZER-Setup-x64.exe**를 한 번 실행하면 시작 메뉴에 **AFM XE7 ANALYZER**가 생깁니다. 설치에는 Windows x64와 Tcl/Tk가 포함된 Python 3.10 이상이 필요합니다. 설치 파일에 앱 소스가 포함되어 있으며, 첫 설치 시 앱 전용 환경에 NumPy와 Matplotlib를 설치할 인터넷 연결이 필요합니다.
 
 이후 시작 메뉴에서 앱을 열 때마다 GitHub의 `main` 버전을 확인합니다. 새 버전은 별도 폴더에 준비하고 실행에 필요한 모듈을 확인한 뒤 전환합니다. 인터넷 연결이나 업데이트 준비에 실패하면 설치된 버전으로 열립니다. 앱과 실행 기록은 `%LOCALAPPDATA%\Programs\AFM XE7 ANALYZER`에 있습니다.
 
@@ -74,6 +74,8 @@ py -m unittest discover -s tests
 Windows 설치 파일은 저장소 루트에서 Go를 사용해 빌드할 수 있습니다.
 
 ```bash
+revision=$(git rev-parse HEAD)
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-  -ldflags='-s -w -H=windowsgui' -o AFM-XE7-ANALYZER-Setup-x64.exe setup_windows.go
+  -ldflags="-s -w -H=windowsgui -X main.seedRevision=$revision" \
+  -o AFM-XE7-ANALYZER-Setup-x64.exe setup_windows.go
 ```
