@@ -1,10 +1,14 @@
-# AFM Data Processing
+# AFM XE7 ANALYZER
 
 Park Systems XE7의 TIFF 원시 측정 데이터를 여는 로컬 분석 프로그램입니다. ZIP, TIFF 파일 또는 폴더를 열어 보정된 높이, 진폭, 위상, 오차 신호를 확인할 수 있습니다.
 
-## Windows에서 실행
+## Windows 앱 설치와 업데이트
 
-GitHub의 **Code → Download ZIP**으로 프로그램을 내려받아 압축을 풉니다. Python 3.10 이상이 설치된 PC에서 해당 폴더를 열고 터미널에 아래 명령을 입력하세요.
+**AFM-XE7-ANALYZER-Setup-x64.exe**를 한 번 실행하면 시작 메뉴에 **AFM XE7 ANALYZER**가 생깁니다. 설치에는 Windows x64와 Tcl/Tk가 포함된 Python 3.10 이상이 필요합니다. 처음 설치할 때 앱 전용 환경에 NumPy와 Matplotlib를 설치합니다.
+
+이후 시작 메뉴에서 앱을 열 때마다 GitHub의 `main` 버전을 확인합니다. 새 버전은 별도 폴더에 준비하고 실행에 필요한 모듈을 확인한 뒤 전환합니다. 인터넷 연결이나 업데이트 준비에 실패하면 설치된 버전으로 열립니다. 앱과 실행 기록은 `%LOCALAPPDATA%\Programs\AFM XE7 ANALYZER`에 있습니다.
+
+## 소스에서 실행
 
 ```powershell
 py -m pip install -r requirements.txt
@@ -16,14 +20,24 @@ macOS와 Linux에서는 `py` 대신 `python3`을 사용합니다. GUI는 Python�
 ## 2D Analysis 탭
 
 1. **Open ZIP / TIFF** 또는 **Open folder**를 선택합니다. 측정 ZIP을 그대로 열 수 있습니다. 드롭다운에서 **Topography · Forward**를 선택합니다.
-2. **Line profile**을 누른 뒤 지도 위 두 점을 클릭하면 거리별 신호가 표시됩니다. 대응하는 역방향 파일이 있으면 두 곡선을 함께 표시합니다.
+2. **Line profile**에서 **Horizontal (X)**를 선택하면 고정된 Y에서 X 방향을, **Vertical (Y)**를 선택하면 고정된 X에서 Y 방향을 읽습니다. 선을 왼쪽 버튼으로 드래그하거나 옆 좌표란에 µm 값을 입력하고 Enter를 누르세요. **Place line**으로 지도 위 다른 위치에 선을 놓을 수도 있습니다. **Free line**은 두 점을 클릭해 만들며, 만든 선 전체를 드래그해 옮길 수 있습니다. 대응하는 역방향 파일이 있으면 두 곡선을 함께 표시합니다.
 3. **Region A**, **Region B** 버튼을 눌러 두 표면에서 각각 평탄한 사각형을 드래그합니다. 각 영역의 평면 보정 후 Sa·Sq, 두 영역 사이의 단차 **B − A**가 표시됩니다. 가능한 경우 정방향과 역방향 각각에 대해 단차를 계산합니다.
 4. **오른쪽 버튼 또는 휠 버튼으로 드래그**하면 화면이 이동하고, **휠 스크롤**은 커서 위치를 중심으로 확대·축소합니다. 선이나 영역을 선택하는 중에도 두 조작을 바로 쓸 수 있습니다. **Fit map**은 전체 지도를 보여주며, **Esc**는 진행 중인 선택을 취소합니다.
 5. **Export**를 누르면 현재 높이 또는 신호의 PNG, 픽셀 CSV, 선택한 라인의 CSV 및 분석 요약 JSON을 새 폴더에 저장합니다.
 
+## 평탄화와 높이 보정
+
+| 설정 | 동작 |
+|---|---|
+| **Background** | 전체 또는 A 영역의 1차 평면을 뺍니다. **Quadratic bow**는 전체 지도에서 2차 곡면을 맞춰 뺍니다. |
+| **Row flatten** | **Median offset**은 X 방향 스캔 행마다 중앙값 오프셋을 맞춥니다. **Linear fit**은 행마다 기울기도 제거합니다. |
+| **Zero Z** | 전체 또는 A 영역의 중앙값을 0 nm로 맞춥니다. |
+
+보정은 표의 순서로 적용됩니다. 2D·3D 지도, 라인 프로파일과 내보내기는 보정값을 사용합니다. A/B 단차와 거칠기는 기본적으로 원시 높이에서 계산하며 **Measure A/B after correction**을 켜면 보정값에서 계산합니다. 행마다 서로 다른 단차나 구조를 가로지르는 시료에서는 행별 평탄화가 실제 높이 대비도 바꿀 수 있습니다.
+
 ## 3D Surface 탭
 
-- 상단의 채널과 평면 보정 옵션을 두 탭이 공유합니다. **Raw**, **Full scan plane**, **Region A plane**으로 원시 높이 또는 기울기를 제거한 높이를 볼 수 있습니다. 단차와 거칠기는 영역의 원시 높이에서 각 보정법으로 계산합니다.
+- 상단의 채널과 보정 옵션을 두 탭이 공유합니다.
 - 표면 위에서 **왼쪽 버튼으로 드래그**하면 가로 이동으로 방위각, 세로 이동으로 고도각이 바뀝니다. **휠 스크롤**로 확대·축소하고 **Reset camera**로 처음 시점으로 돌아갑니다.
 - 높이 채널의 **Z축과 색상 막대는 nm**, X·Y축은 µm입니다. 작은 높이 변화가 보이도록 그림의 세로 비율은 자동으로 조정합니다. 다른 채널을 열면 Z축에 해당 신호의 단위를 표시합니다. 부드러운 회전을 위해 3D 표면은 최대 72 × 72 지점으로 그리며, 2D 측정 및 CSV는 원본 해상도를 사용합니다.
 
@@ -55,4 +69,11 @@ Park TIFF 태그와 보정식은 [Gwyddion의 Park Systems 가져오기 모듈](
 
 ```powershell
 py -m unittest discover -s tests
+```
+
+Windows 설치 파일은 저장소 루트에서 Go를 사용해 빌드할 수 있습니다.
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+  -ldflags='-s -w -H=windowsgui' -o AFM-XE7-ANALYZER-Setup-x64.exe setup_windows.go
 ```
