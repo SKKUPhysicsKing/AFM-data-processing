@@ -1,0 +1,52 @@
+# AFM Data Processing
+
+Park Systems XE7의 TIFF 원시 측정 데이터를 여는 로컬 분석 프로그램입니다. ZIP, TIFF 파일 또는 폴더를 열어 보정된 높이, 진폭, 위상, 오차 신호를 확인할 수 있습니다.
+
+## Windows에서 실행
+
+GitHub의 **Code → Download ZIP**으로 프로그램을 내려받아 압축을 풉니다. Python 3.10 이상이 설치된 PC에서 해당 폴더를 열고 터미널에 아래 명령을 입력하세요.
+
+```powershell
+py -m pip install -r requirements.txt
+py viewer.py
+```
+
+macOS와 Linux에서는 `py` 대신 `python3`을 사용합니다. GUI는 Python의 Tkinter를 사용하므로, Tkinter가 별도 패키지인 Linux 배포판에서는 해당 패키지를 설치하세요.
+
+## 화면에서 분석
+
+1. **Open ZIP / TIFF** 또는 **Open folder**를 선택합니다. 측정 ZIP을 그대로 열 수 있습니다. 드롭다운에서 **Topography · Forward**를 선택합니다.
+2. **Line profile**을 누른 뒤 지도 위 두 점을 클릭하면 거리별 신호가 표시됩니다. 대응하는 역방향 파일이 있으면 두 곡선을 함께 표시합니다.
+3. **Region A**, **Region B** 버튼을 눌러 두 표면에서 각각 평탄한 사각형을 드래그합니다. 각 영역의 평면 보정 후 Sa·Sq, 두 영역 사이의 단차 **B − A**가 표시됩니다. 가능한 경우 정방향과 역방향 각각에 대해 단차를 계산합니다.
+4. **Raw**, **Full scan plane**, **Region A plane**에서 표시할 높이 지도를 선택합니다. 단차와 거칠기는 각 영역의 원시 높이에서 해당 보정법으로 계산합니다. 작은 영역을 선택할 때는 지도 아래 도구의 확대를 사용하고, 확대 모드를 끈 뒤 영역을 그리세요. **Fit map**은 전체 영역으로 돌아갑니다.
+5. **Export**를 누르면 현재 높이 또는 신호의 PNG, 픽셀 CSV, 선택한 라인의 CSV 및 분석 요약 JSON을 새 폴더에 저장합니다.
+
+## 여러 파일 한 번에 내보내기
+
+```powershell
+py batch.py "C:\data\scan.zip" --output "C:\data\afm-results"
+```
+
+채널별 PNG와 보정값 CSV, 스캔 메타데이터 및 정방향·역방향 비교가 담긴 `summary.json`을 생성합니다. 대응하는 두 높이 파일의 차이 지도도 저장합니다. 출력 폴더는 새 경로를 지정하세요.
+
+평면 보정 및 단차 계산은 아래처럼 영역 좌표를 지정할 수 있습니다. 각 사각형은 **Xmin Xmax Ymin Ymax** 순서이며 단위는 µm입니다.
+
+```powershell
+py batch.py "C:\data\scan.zip" -o "C:\data\afm-step" --step 39.5 40.5 36.2 37.5 39.5 40.5 39.8 42.4
+```
+
+위 좌표는 50 × 50 µm 스캔에서 단차 영역을 지정하는 예입니다. 평면을 제거한 지도를 내보내려면 `--plane`(전체 영상에 맞춘 평면) 또는 `--background Xmin Xmax Ymin Ymax`(선택 영역에 맞춘 평면)을 추가하세요.
+
+## 수치 해석
+
+- **Park TIFF 1.0.1/1.0.2의 2차원 채널**을 지원합니다. 측정 픽셀과 보정값은 TIFF의 Park 전용 태그에 들어 있습니다. 높이는 nm로 변환하고, 위상 등은 헤더의 단위를 유지합니다. 표시용 색상 범위는 1–99 백분위수이며 CSV에는 픽셀의 보정값 전체가 들어 있습니다.
+- 좌표 원점은 표시된 스캔의 왼쪽 아래이고, CSV의 X·Y는 픽셀 중심 좌표입니다. 방향은 파일명에서 `Forward` / `Backward` 토큰을 읽습니다. 방향 토큰 외의 이름, 채널, 스캔 형상과 좌표계가 일치하는 두 파일을 짝지어 같은 픽셀 위치에서 비교합니다.
+- 단차는 두 영역에 공통 기울기와 별도의 높이 절편을 맞춘 결과입니다. 각 영역이 평탄하고 서로 비슷한 기울기를 갖는지 확인하세요. 플레이크 두께를 구할 때는 두 영역이 각각 플레이크 표면과 노출 기판임을 확인해야 합니다.
+- Sa와 Sq는 선택한 영역에서 1차 평면을 뺀 높이 편차로 계산합니다. 가장자리, 입자, 튀는 픽셀을 포함하면 해당 구조가 거칠기에도 반영됩니다.
+- 서로 다른 색상 범위가 적용된 두 지도는 색상만으로 높이 차이를 비교하기 어렵습니다. 정·역방향 라인 프로파일과 차이 지도를 함께 볼 수 있습니다.
+
+Park TIFF 태그와 보정식은 [Gwyddion의 Park Systems 가져오기 모듈](https://svn.code.sf.net/p/gwyddion/code/trunk/gwyddion/modules/file/psia.c)을 참고했습니다.
+
+```powershell
+py -m unittest discover -s tests
+```
