@@ -6,11 +6,42 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from afm import Region, Scan, _region_grid, level_height
+from afm import Point, Region, Scan, _region_grid, level_height
+from profiles import profile_column, sample_profile
 
 BACKGROUNDS = ("Raw", "Full scan plane", "Region A plane", "Quadratic bow")
 ROW_FLATTEN = ("Off", "Median offset", "Linear fit")
 ZERO_REFERENCES = ("Off", "Scan median", "Region A median")
+
+
+@dataclass(frozen=True)
+class ProfileBaseline:
+    points: tuple[Point, Point]
+    axis: str | None
+    limits: tuple[float, float]
+
+    def subtract(self, scan: Scan, values: np.ndarray) -> np.ndarray:
+        """Subtract the fitted profile trend across the entire height map."""
+        profile = sample_profile(scan, values, self.points, self.axis)
+        axis_values = profile[:, profile_column(self.axis)]
+        low, high = self.limits
+        selected = profile[(low <= axis_values) & (axis_values <= high)]
+        if len(selected) < 3:
+            raise ValueError("Select a baseline span with at least three profile samples.")
+        start, end = self.points
+        direction = np.subtract(end, start)
+        ux, uy = direction / np.linalg.norm(direction)
+        x, y = scan.centers_um
+        # Profiles use the nearest edge sample beyond the outer pixel centers.
+        along = ux * np.clip(selected[:, 1], x[0], x[-1]) + uy * np.clip(selected[:, 2], y[0], y[-1])
+        mean_position = along.mean()
+        centered = along - mean_position
+        denominator = centered @ centered
+        if denominator == 0:
+            raise ValueError("Select a wider span for the baseline fit.")
+        heights = selected[:, 3]
+        slope = (centered @ (heights - heights.mean())) / denominator
+        return values - (heights.mean() + slope * (ux * x[None, :] + uy * y[:, None] - mean_position))
 
 
 @dataclass(frozen=True)
@@ -19,12 +50,15 @@ class Corrections:
     row_flatten: str = "Off"
     zero_reference: str = "Off"
     reference: Region | None = None
+    profile_baseline: ProfileBaseline | None = None
 
     @property
     def label(self) -> str:
         parts = [self.background]
         if self.row_flatten != "Off":
             parts.append(f"Rows: {self.row_flatten}")
+        if self.profile_baseline is not None:
+            parts.append("Profile baseline")
         if self.zero_reference != "Off":
             parts.append(f"Zero: {self.zero_reference}")
         return " · ".join(parts)
@@ -38,8 +72,6 @@ class Corrections:
         values = scan.values
         if self.background == "Full scan plane":
             values = level_height(scan)
-        elif self.background == "Region A plane":
-            values = level_height(scan, self.reference)
         elif self.background == "Quadratic bow":
             values = remove_quadratic_background(values)
         if self.row_flatten != "Off":
@@ -52,6 +84,12 @@ class Corrections:
                     slopes = (values @ x) / denominator
                     values = values - slopes[:, None] * x[None, :]
             values = values - np.median(values, axis=1, keepdims=True) + median
+        # Fit the chosen reference after row flattening so row offsets cannot
+        # reintroduce tilt in the selected baseline area.
+        if self.background == "Region A plane":
+            values = level_height(replace(scan, values=values), self.reference)
+        if self.profile_baseline is not None:
+            values = self.profile_baseline.subtract(scan, values)
         if self.zero_reference == "Scan median":
             values = values - np.median(values)
         elif self.zero_reference == "Region A median":

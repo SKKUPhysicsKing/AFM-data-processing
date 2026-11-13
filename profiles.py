@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from afm import Point, Scan
+from afm import Point, Scan, line_profile
 
 PROFILE_MODES = {"Free line": None, "Horizontal (X)": "x", "Vertical (Y)": "y"}
 
@@ -30,6 +30,25 @@ def axis_profile(scan: Scan, values: np.ndarray, axis: str, position: float) -> 
     fixed = np.full(coordinates.shape, position)
     xy = (coordinates, fixed) if axis == "x" else (fixed, coordinates)
     return np.column_stack((coordinates - coordinates[0], *xy, profile))
+
+
+def sample_profile(scan: Scan, values: np.ndarray, points: tuple[Point, Point], axis: str | None) -> np.ndarray:
+    if axis:
+        return axis_profile(scan, values, axis, points[0][1 if axis == "x" else 0])
+    return line_profile(scan, values, *points)
+
+
+def profile_column(axis: str | None) -> int:
+    return {None: 0, "x": 1, "y": 2}[axis]
+
+
+def profile_labels(points: tuple[Point, ...], axis: str | None) -> tuple[str, str]:
+    if axis and len(points) == 2:
+        fixed = 1 if axis == "x" else 0
+        fixed_label = "Y" if fixed else "X"
+        return (f"{axis.upper()} profile at {fixed_label} = {points[0][fixed]:.5g} µm",
+                f"Scan {axis.upper()} (µm)")
+    return "Line profile", "Distance (µm)"
 
 
 def translated_line(points: list[Point], dx: float, dy: float, size: Point) -> list[Point]:

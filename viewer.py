@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import tkinter as tk
 from dataclasses import asdict, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from textwrap import fill
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import RectangleSelector
+from matplotlib.widgets import RectangleSelector, SpanSelector
 
-from afm import Scan, line_profile, load_inputs, pair_metrics, roughness, scan_pairs, step_height
-from batch import describe, draw_map, save_json, save_map, save_pixels
-from corrections import BACKGROUNDS, ROW_FLATTEN, ZERO_REFERENCES, Corrections
+from afm import Scan, load_inputs, pair_metrics, roughness, scan_pairs, step_height
+from batch import describe, draw_map
+from corrections import BACKGROUNDS, ROW_FLATTEN, ZERO_REFERENCES, Corrections, ProfileBaseline
+from exporting import draw_selection, save_view
 from navigation import PlotNavigation
-from profiles import PROFILE_MODES, axis_endpoints, axis_profile, near_line, translated_line
+from profiles import PROFILE_MODES, axis_endpoints, near_line, profile_column, profile_labels, sample_profile, translated_line
 from surface import SurfaceView
 
 
@@ -33,6 +33,8 @@ class Viewer:
         self.points = []
         self.tool = None
         self.selector = None
+        self.baseline_selector = None
+        self.baseline = None
         self.profiles = []
         self.profile_axis = None
         self.profile_drag = None
@@ -53,6 +55,8 @@ class Viewer:
         revision = os.environ.get("AFM_XE7_REVISION", "")
         if revision:
             ttk.Label(panel, text=f"Build {revision[:7]}").pack(side="right", padx=4)
+        self.export_button = ttk.Button(panel, text="Export current view", command=self.export, state="disabled")
+        self.export_button.pack(side="right", padx=5)
         self.setup_corrections()
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -80,7 +84,9 @@ class Viewer:
             ttk.Button(region_tools, text=label, command=lambda m=mode: self.start_tool(m)).pack(side="left", padx=(0, 5))
         ttk.Button(region_tools, text="Clear", command=self.clear_selection).pack(side="left", padx=(0, 5))
         ttk.Button(region_tools, text="Fit map", command=self.fit_map).pack(side="left")
-        ttk.Button(region_tools, text="Export", command=self.export).pack(side="right")
+        ttk.Button(region_tools, text="Flatten to A", command=self.flatten_to_a).pack(side="left", padx=5)
+        ttk.Button(region_tools, text="Fit profile baseline", command=self.start_baseline).pack(side="left", padx=5)
+        ttk.Button(region_tools, text="Reset correction", command=self.reset_corrections).pack(side="left", padx=5)
         ttk.Label(self.analysis_tab, text="Left drag a profile line to move it · Right/middle drag to pan · Scroll to zoom",
                   padding=(12, 0)).pack(anchor="w")
         self.status = tk.StringVar(value="Open a Park AFM TIFF, folder, or ZIP.")
@@ -169,6 +175,7 @@ class Viewer:
             messagebox.showerror("No scans loaded", "\n".join(problems[:12]))
             return
         self.scans = scans
+        self.export_button.configure(state="normal")
         self.channel.configure(values=[
             f"{i + 1:02d}  {scan.channel} · {scan.direction}   |   {scan.name}"
             for i, scan in enumerate(scans)
@@ -197,6 +204,7 @@ class Viewer:
         self.points.clear()
         self.profile_axis = None
         self.profile_drag = None
+        self.baseline = None
         self.regions.clear()
         self.tool = None
         if self.level.get() == "Region A plane":
@@ -205,6 +213,51 @@ class Viewer:
             self.zero.current(0)
         self.status.set("Choose a line profile or select a region.")
         self.render()
+
+    def flatten_to_a(self):
+        if self.scan is None or not self.scan.is_height or "A" not in self.regions:
+            self.status.set("Select a flat background area with Region A first.")
+            return
+        self.level.set("Region A plane")
+        self.flatten.set("Off")
+        self.zero.set("Off")
+        self.baseline = None
+        self.tool = None
+        self.correct_measurements.set(True)
+        self.status.set("The plane fitted to region A is now the height reference.")
+        self.render()
+
+    def reset_corrections(self):
+        self.baseline = None
+        self.tool = None
+        for control in (self.level, self.flatten, self.zero):
+            control.current(0)
+        self.correct_measurements.set(False)
+        self.status.set("Corrections reset.")
+        self.render()
+
+    def start_baseline(self):
+        if self.scan is None or not self.scan.is_height or len(self.points) != 2:
+            self.status.set("Place a line on the topography before fitting a baseline.")
+            return
+        self.tool = "baseline"
+        self.status.set("Drag across a flat reference span on the profile graph.")
+        self.render()
+
+    def select_baseline(self, low, high):
+        baseline = ProfileBaseline(tuple(self.points), self.profile_axis, (low, high))
+        trial = replace(self.correction_settings(), profile_baseline=baseline)
+        try:
+            for scan in self.pair or (self.scan,):
+                trial.apply(scan)
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        self.baseline = baseline
+        self.correct_measurements.set(True)
+        self.tool = None
+        self.status.set(f"Baseline fitted over {low:.4g}–{high:.4g} µm.")
+        self.root.after_idle(self.render)
 
     def fit_map(self):
         if self.scan is not None:
@@ -276,7 +329,7 @@ class Viewer:
         self.render()
 
     def click_map(self, event):
-        if (self.scan is None or self.tool in ("A", "B") or event.button != 1
+        if (self.scan is None or self.tool in ("A", "B", "baseline") or event.button != 1
                 or event.inaxes is not self.map_ax or event.xdata is None or event.ydata is None):
             return
         point = tuple(float(np.clip(v, 0, size)) for v, size in zip(
@@ -334,7 +387,7 @@ class Viewer:
     def correction_settings(self) -> Corrections:
         background, zero = self.level.get(), self.zero.get()
         reference = self.regions.get("A") if background == "Region A plane" or zero == "Region A median" else None
-        return Corrections(background, self.flatten.get(), zero, reference)
+        return Corrections(background, self.flatten.get(), zero, reference, self.baseline)
 
     def displayed_values(self, scan: Scan) -> np.ndarray:
         settings = self.correction_settings()
@@ -369,9 +422,15 @@ class Viewer:
         if self.selector is not None:
             self.selector.disconnect_events()
             self.selector = None
+        if self.baseline_selector is not None:
+            self.baseline_selector.disconnect_events()
+            self.baseline_selector = None
         limits = None
+        profile_limits = None
         if self.view_scan is not None and self.view_scan is self.scan:
             limits = self.map_ax.get_xlim(), self.map_ax.get_ylim()
+            if self.tool == "baseline":
+                profile_limits = self.profile_ax.get_xlim(), self.profile_ax.get_ylim()
         self.figure.clear()
         self.map_ax, self.profile_ax = self.figure.subplots(1, 2, gridspec_kw={"width_ratios": [1.15, 1]})
         self.navigation.set_axes(self.map_ax, self.profile_ax, self.scan)
@@ -390,18 +449,14 @@ class Viewer:
         scan = self.scan
         data = self.displayed_values(scan)
         raster = draw_map(self.map_ax, scan, data)
-        self.map_ax.set_title(f"{scan.channel} · {scan.direction}\n{self.correction_settings().label}")
+        self.map_ax.set_title(f"{scan.channel} · {scan.direction}\n{fill(self.correction_settings().label, 45)}")
         self.figure.colorbar(raster, ax=self.map_ax, label=scan.unit, shrink=0.85)
-        for label, (x0, x1, y0, y1) in self.regions.items():
-            color = "#38d9e6" if label == "A" else "#85f078"
-            self.map_ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
-                                            edgecolor=color, linewidth=1.6))
-            self.map_ax.text(x0, y1, label, color=color, fontweight="bold")
+        draw_selection(self.map_ax, self.regions)
         self.map_line, = self.map_ax.plot([], [], "o-", color="#38d9e6", linewidth=1.8, markersize=4)
         if limits:
             self.map_ax.set(xlim=limits[0], ylim=limits[1])
         self.view_scan = scan
-        self.profile_ax.set(ylabel=scan.unit)
+        self.profile_ax.set(ylabel=f"{'Height' if scan.is_height else scan.channel} ({scan.unit})")
         self.profile_curves = [
             (member, self.profile_ax.plot([], [], label=member.direction)[0])
             for member in self.pair or (scan,)
@@ -417,6 +472,12 @@ class Viewer:
                                               props={"facecolor": "#38d9e6", "alpha": 0.25},
                                               useblit=False)
         self.update_profile()
+        if profile_limits:
+            self.profile_ax.set(xlim=profile_limits[0], ylim=profile_limits[1])
+        if self.tool == "baseline":
+            self.baseline_selector = SpanSelector(self.profile_ax, self.select_baseline, "horizontal",
+                                                  button=1, props={"facecolor": "#39a0b5", "alpha": 0.25})
+            self.canvas.draw_idle()
         self.update_details()
         self.refresh_surface()
 
@@ -427,15 +488,14 @@ class Viewer:
             self.map_line.set_data([], [])
         has_profile = len(self.points) == 2
         axis = self.profile_axis
-        title, xlabel, column = "Line profile", "Distance (µm)", 0
+        points = tuple(self.points)
+        title, xlabel = profile_labels(points, axis)
+        column = profile_column(axis)
         fixed_position = None
         if axis and has_profile:
             fixed = 1 if axis == "x" else 0
             fixed_label = "Y" if fixed else "X"
             fixed_position = self.points[0][fixed]
-            column = 1 if axis == "x" else 2
-            xlabel = f"Scan {axis.upper()} (µm)"
-            title = f"{axis.upper()} profile at {fixed_label} = {fixed_position:.5g} µm"
             self.position_label.set(f"{fixed_label} (µm)")
             self.position.configure(state="normal", from_=0, to=self.scan.size_um[fixed],
                                     increment=self.scan.pitch_um[fixed], format="%.6f")
@@ -451,8 +511,7 @@ class Viewer:
                 curve.set_data([], [])
                 continue
             values = self.displayed_values(member)
-            profile = (axis_profile(member, values, axis, fixed_position) if axis
-                       else line_profile(member, values, *self.points))
+            profile = sample_profile(member, values, points, axis)
             self.profiles.append((member.direction, profile))
             curve.set_data(profile[:, column], profile[:, 3])
         self.profile_legend.set_visible(has_profile)
@@ -497,23 +556,19 @@ class Viewer:
         try:
             measurements = self.measurements()
         except ValueError as exc:
-            messagebox.showerror("Check the selected regions", str(exc))
-            return
-        parent = filedialog.askdirectory(title="Choose where to save the analysis")
+            measurements = {"note": str(exc)}
+        scan = self.scan
+        source_dir = Path(scan.path.partition("!/")[0]).parent
+        parent = filedialog.askdirectory(title="Save the current AFM view", initialdir=source_dir, parent=self.root)
         if not parent:
             return
         try:
-            folder = Path(tempfile.mkdtemp(prefix="afm-", dir=parent))
-            scan = self.scan
             values = self.displayed_values(scan)
             settings = self.correction_settings()
-            save_map(folder / "map.png", scan, values, f"{scan.channel} · {scan.direction}\n{settings.label}")
-            save_pixels(folder / "pixels.csv", scan, values)
-            for direction, data in self.profiles:
-                np.savetxt(folder / f"profile_{direction.lower()}.csv", data,
-                           fmt="%.10g", delimiter=",", comments="",
-                           header="distance_um,x_um,y_um,value")
-            save_json(folder / "summary.json", {
+            map_limits = self.map_ax.get_xlim(), self.map_ax.get_ylim()
+            profile_limits = self.profile_ax.get_xlim(), self.profile_ax.get_ylim()
+            camera = self.surface.camera
+            report = {
                 **describe(scan),
                 "map_transform": settings.label,
                 "corrections": asdict(settings),
@@ -522,11 +577,19 @@ class Viewer:
                 "profile_axis": self.profile_axis,
                 "regions": measurements,
                 "raw_direction_comparison": pair_metrics(*self.pair) if self.pair else None,
-            })
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Could not export", str(exc))
+                "map_limits_um": map_limits,
+                "profile_limits": profile_limits if self.profiles else None,
+                "camera_3d": asdict(camera),
+            }
+            files = save_view(Path(parent), scan, values, tuple(self.points), self.profile_axis,
+                              tuple(self.profiles), self.regions, map_limits, profile_limits,
+                              camera, report)
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Could not export", str(exc), parent=self.root)
             return
-        messagebox.showinfo("Analysis saved", str(folder))
+        self.status.set(f"Saved {len(files)} files.")
+        messagebox.showinfo("Analysis saved", f"{parent}\n\n" + "\n".join(file.name for file in files),
+                            parent=self.root)
 
 
 if __name__ == "__main__":
